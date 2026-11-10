@@ -1,0 +1,19 @@
+{
+    "name": "nitida/wp-mu-agent",
+    "description": "WordPress must-use plugin: lets the MAU site agent edit the site over the REST API and nothing more (restricted role, IP-locked application password, draft previews, undo log).",
+    "type": "wordpress-muplugin",
+    "license": "MIT",
+    "homepage": "https://github.com/lintmycode/wp-mu-agent",
+    "authors": [
+        { "name": "nitida", "homepage": "https://nitida.pt" }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "composer/installers": "^1.0 || ^2.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/installers": true
+        }
+    }
+}
