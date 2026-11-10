@@ -274,12 +274,19 @@ function snapshot(int $post_id): array
 function log_change(int $post_id, string $action, ?array $snapshot): void
 {
     global $wpdb;
-    $wpdb->insert(table(), [
+    $row = [
         'post_id'    => $post_id,
         'action'     => $action,
         'snapshot'   => $snapshot === null ? null : wp_json_encode($snapshot),
         'created_at' => current_time('mysql', true),
-    ]);
+    ];
+    if ($wpdb->insert(table(), $row) === false) {
+        // The table can be gone while the version option survives (dropped by hand, partial DB restore).
+        // Without the log, undo silently stops working: recreate it and write the row again.
+        delete_option(OPT_DB);
+        install_table();
+        $wpdb->insert(table(), $row);
+    }
 }
 
 add_action('wp_insert_post', function (int $post_id, \WP_Post $post, bool $update): void {
@@ -287,6 +294,13 @@ add_action('wp_insert_post', function (int $post_id, \WP_Post $post, bool $updat
         log_change($post_id, 'create', null);
     }
 }, 10, 3);
+
+// Uploads never reach the wp_insert_post action (wp_insert_post returns early for attachments): log them here.
+add_action('add_attachment', function (int $post_id): void {
+    if (!restoring() && is_agent()) {
+        log_change($post_id, 'create', null);
+    }
+});
 
 add_action('pre_post_update', function (int $post_id): void {
     if (restoring() || !is_agent()) {

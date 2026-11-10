@@ -30,6 +30,7 @@ class Cli
         }
         $data = [
             'version'      => VERSION,
+            'log_table'    => (bool) $GLOBALS['wpdb']->get_var($GLOBALS['wpdb']->prepare('SHOW TABLES LIKE %s', table())),
             'role'         => (bool) get_role(ROLE),
             'user'         => $user ? $user->user_login : null,
             'user_is_agent'=> $user ? is_agent($user) : false,
