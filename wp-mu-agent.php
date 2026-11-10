@@ -2,7 +2,7 @@
 /**
  * Plugin Name: nitida — MAU site agent
  * Description: Lets the MAU site agent (a Telegram bot on its own VPS) edit this site through the REST API and nothing more: a restricted role, application passwords for that role only and only from the agent's IP, signed draft previews, and an undo log.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: nitida
  * License: MIT
  *
@@ -24,7 +24,7 @@ namespace Nitida\Agent;
 
 defined('ABSPATH') || exit;
 
-const VERSION     = '1.0.0';
+const VERSION     = '1.0.1';
 const ROLE        = 'mau_agent';
 const LOGIN       = 'mau-agent';
 const APP_NAME    = 'mau-agent-vps';
@@ -188,15 +188,22 @@ function route_allowed(string $method, string $route): bool
     return false;
 }
 
-add_filter('rest_pre_dispatch', function ($result, $server, \WP_REST_Request $request) {
-    if ($result !== null || !is_agent()) {
-        return $result;
+// The allowlist is enforced twice, both at PHP_INT_MAX so no other plugin has the last word:
+// - rest_pre_dispatch: ACF registers ACF_Rest_API::initialize there at priority 10 and returns null,
+//   which wiped out our 403 when we also ran at 10 (1.0.0: the allowlist did nothing on ACF sites).
+//   A non-null result from another plugin (e.g. a cached response) is overridden too.
+// - rest_request_before_callbacks: runs right before the route callback, also for each request inside
+//   /batch/v1 (batch sub-requests never go through rest_pre_dispatch).
+function deny(\WP_REST_Request $request): ?\WP_Error
+{
+    if (!is_agent() || route_allowed($request->get_method(), $request->get_route())) {
+        return null;
     }
-    if (!route_allowed($request->get_method(), $request->get_route())) {
-        return new \WP_Error('mau_agent_route', 'Not available to the agent.', ['status' => 403]);
-    }
-    return $result;
-}, 10, 3);
+    return new \WP_Error('mau_agent_route', 'Not available to the agent.', ['status' => 403]);
+}
+
+add_filter('rest_pre_dispatch', fn($result, $server, \WP_REST_Request $request) => deny($request) ?? $result, PHP_INT_MAX, 3);
+add_filter('rest_request_before_callbacks', fn($response, $handler, \WP_REST_Request $request) => deny($request) ?? $response, PHP_INT_MAX, 3);
 
 // ---------------------------------------------------------------------------------
 // 4. Change log + undo. Every change the agent makes is recorded with the post as it

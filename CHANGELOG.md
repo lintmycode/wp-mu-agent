@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-11-10
+- **Security:** the REST allowlist did nothing on sites running ACF. ACF's `rest_pre_dispatch` callback (priority 10)
+  returns null and overwrote our 403, so the agent could reach users, posts, pages and custom routes (its role's
+  capabilities still applied). The check now runs at `PHP_INT_MAX` on `rest_pre_dispatch` and again on
+  `rest_request_before_callbacks`, which also covers requests inside `/batch/v1`.
+
 ## 1.0.0 — 2026-11-10
 - Initial release: `mau_agent` role, app passwords for that role only with an IP lock, REST allowlist,
   change log with undo, signed draft previews, `discard`, `schema`, WP-CLI `status / schema / setup / revoke / log`.
