@@ -2,7 +2,7 @@
 /**
  * Plugin Name: nitida — MAU site agent
  * Description: Lets the MAU site agent (a Telegram bot on its own VPS) edit this site through the REST API and nothing more: a restricted role, application passwords for that role only and only from the agent's IP, signed draft previews, and an undo log.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: nitida
  * License: MIT
  *
@@ -15,7 +15,9 @@
  *     enabled at setup, upload media. No delete capability, no unfiltered_html (kses filters what it writes);
  *     it can move an item of an enabled type to the trash only through POST /mau-agent/v1/trash/{id},
  *     after the client confirmed it, and that is logged so undo puts it back (1.1.0).
- *     no new terms, no settings, users, plugins or themes.
+ *     no settings, users, plugins or themes. Terms (categories, event types…) of the enabled types are read
+ *     only, unless `wp mau-agent terms on` (1.2.0): then it may create and rename them through REST and delete
+ *     them through POST /mau-agent/v1/term-delete, all logged and undoable through term-undo.
  *   - it authenticates only with an application password, only from the IPs saved at setup, and only
  *     on an allowlist of REST routes. It cannot log in to wp-admin.
  *   - every other user keeps exactly the application-password setting the site had before
@@ -26,13 +28,14 @@ namespace Nitida\Agent;
 
 defined('ABSPATH') || exit;
 
-const VERSION     = '1.1.0';
+const VERSION     = '1.2.0';
 const ROLE        = 'mau_agent';
 const LOGIN       = 'mau-agent';
 const APP_NAME    = 'mau-agent-vps';
 const OPT_IPS     = 'mau_agent_allowed_ips';   // list of IPs; '*' accepted outside production only
 const OPT_TYPES   = 'mau_agent_types';         // post type names the agent may edit
 const OPT_ROUTES  = 'mau_agent_extra_routes';  // extra REST route prefixes, e.g. /casino/v1/events
+const OPT_TERMS   = 'mau_agent_terms';         // '1' = the agent may create, rename and delete terms (1.2.0)
 const OPT_DB      = 'mau_agent_db';
 const DB_VERSION  = '1';
 const PREVIEW_TTL = 259200;                    // 72 h
@@ -57,6 +60,36 @@ function is_agent(?\WP_User $user = null): bool
 function enabled_types(): array
 {
     return array_values(array_filter((array) get_option(OPT_TYPES, []), 'post_type_exists'));
+}
+
+function terms_enabled(): bool
+{
+    return (bool) get_option(OPT_TERMS, false);
+}
+
+/** @return \WP_Taxonomy[] taxonomies in REST of the enabled types, keyed by name */
+function agent_taxonomies(): array
+{
+    $out = [];
+    foreach (enabled_types() as $type) {
+        foreach (get_object_taxonomies($type, 'objects') as $tax) {
+            if ($tax->show_in_rest) {
+                $out[$tax->name] = $tax;
+            }
+        }
+    }
+    return $out;
+}
+
+/** A taxonomy of the enabled types, by REST base or name. */
+function agent_taxonomy(string $base): ?\WP_Taxonomy
+{
+    foreach (agent_taxonomies() as $tax) {
+        if ($tax->name === $base || ($tax->rest_base ?: $tax->name) === $base) {
+            return $tax;
+        }
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------------
@@ -93,6 +126,20 @@ function ensure_role(array $types): void
         $role->add_cap($cap);
     }
 }
+
+// Terms switched on: grant the term capabilities of the enabled types' taxonomies at check time instead of
+// storing them in the role, so `wp mau-agent terms off` takes them away at once. (For categories and tags this
+// is manage_categories; the REST allowlist still keeps the agent on its own taxonomies' routes.)
+// Not delete_terms: deleting goes through term-delete only, which logs a snapshot for undo.
+add_filter('user_has_cap', function (array $allcaps, array $caps, array $args, \WP_User $user): array {
+    if (terms_enabled() && is_agent($user)) {
+        foreach (agent_taxonomies() as $tax) {
+            $allcaps[$tax->cap->manage_terms] = true;
+            $allcaps[$tax->cap->edit_terms]   = true;
+        }
+    }
+    return $allcaps;
+}, 10, 4);
 
 // ---------------------------------------------------------------------------------
 // 2. Application passwords: on for the agent role only, everyone else unchanged.
@@ -174,9 +221,9 @@ function route_allowed(string $method, string $route): bool
         if (($read || $write) && preg_match('#^' . preg_quote($base, '#') . '(/\d+)?$#', $route)) {
             return true;
         }
-        // Terms: read only. The agent picks existing categories, it does not create them.
+        // Terms: read, plus create/rename (POST) when `terms` is on. Deleting is term-delete/…, never DELETE.
         foreach (get_object_taxonomies($type, 'objects') as $tax) {
-            if ($read && $tax->show_in_rest
+            if (($read || ($write && terms_enabled())) && $tax->show_in_rest
                 && preg_match('#^/' . preg_quote(($tax->rest_namespace ?: 'wp/v2') . '/' . ($tax->rest_base ?: $tax->name), '#') . '(/\d+)?$#', $route)) {
                 return true;
             }
@@ -323,7 +370,7 @@ add_action('pre_post_update', function (int $post_id): void {
     // One message from the client can mean several REST calls on the same post: keep the first
     // "before" so undo returns to the state before the whole change, not halfway.
     $recent = $wpdb->get_var($wpdb->prepare(
-        'SELECT id FROM ' . table() . ' WHERE post_id = %d AND undone_at IS NULL AND created_at > %s LIMIT 1',
+        'SELECT id FROM ' . table() . " WHERE post_id = %d AND action NOT LIKE 'term\\_%%' AND undone_at IS NULL AND created_at > %s LIMIT 1",
         $post_id,
         gmdate('Y-m-d H:i:s', time() - COALESCE)
     ));
@@ -386,7 +433,7 @@ function undo(int $post_id)
 {
     global $wpdb;
     $rows = $wpdb->get_results($wpdb->prepare(
-        'SELECT * FROM ' . table() . ' WHERE post_id = %d AND undone_at IS NULL AND created_at > %s ORDER BY id DESC',
+        'SELECT * FROM ' . table() . " WHERE post_id = %d AND action NOT LIKE 'term\\_%%' AND undone_at IS NULL AND created_at > %s ORDER BY id DESC",
         $post_id,
         gmdate('Y-m-d H:i:s', time() - UNDO_DAYS * DAY_IN_SECONDS)
     ));
@@ -415,13 +462,129 @@ function undo(int $post_id)
         } finally {
             restoring(false);
         }
-        $wpdb->query($wpdb->prepare('UPDATE ' . table() . ' SET undone_at = %s WHERE post_id = %d AND undone_at IS NULL', $now, $post_id));
+        $wpdb->query($wpdb->prepare('UPDATE ' . table() . " SET undone_at = %s WHERE post_id = %d AND action NOT LIKE 'term\\_%%' AND undone_at IS NULL", $now, $post_id));
         return ['action' => 'trashed', 'post' => $post_id];
     }
     $row = $rows[0];
     restore($post_id, json_decode($row->snapshot, true));
     $wpdb->update(table(), ['undone_at' => $now], ['id' => $row->id]);
     return ['action' => 'restored', 'post' => $post_id];
+}
+
+// ---------------------------------------------------------------------------------
+// 4b. Terms (1.2.0, only with `wp mau-agent terms on`). Same log table: post_id holds the term id and the
+//     action is term_create / term_update / term_delete, so post undo skips these rows (ids can collide).
+// ---------------------------------------------------------------------------------
+function term_snapshot(\WP_Term $term): array
+{
+    return [
+        'taxonomy'    => $term->taxonomy,
+        'name'        => $term->name,
+        'slug'        => $term->slug,
+        'description' => $term->description,
+        'parent'      => (int) $term->parent,
+    ];
+}
+
+function agent_term_change(string $taxonomy): bool
+{
+    return !restoring() && is_agent() && terms_enabled() && isset(agent_taxonomies()[$taxonomy]);
+}
+
+add_action('created_term', function (int $term_id, int $tt_id, string $taxonomy): void {
+    if (agent_term_change($taxonomy)) {
+        log_change($term_id, 'term_create', ['taxonomy' => $taxonomy]);
+    }
+}, 10, 3);
+
+// edit_terms fires before the update: the snapshot is the term as it was.
+add_action('edit_terms', function (int $term_id, string $taxonomy): void {
+    $term = get_term($term_id, $taxonomy);
+    if ($term instanceof \WP_Term && agent_term_change($taxonomy)) {
+        log_change($term_id, 'term_update', term_snapshot($term));
+    }
+}, 10, 2);
+
+/**
+ * Delete one term on the client's request. The snapshot keeps the posts that had it and its child terms,
+ * so undo recreates it (with a new id: WordPress cannot reuse one) and attaches them again.
+ * @return array{action:string, term:int}|\WP_Error
+ */
+function term_delete(string $base, int $term_id)
+{
+    $tax  = agent_taxonomy($base);
+    $term = $tax ? get_term($term_id, $tax->name) : null;
+    if (!terms_enabled() || !$term instanceof \WP_Term) {
+        return new \WP_Error('mau_agent_term', 'Only terms of the enabled types can be deleted, and only when terms are on.', ['status' => 403]);
+    }
+    if ($tax->name === 'category' && $term_id === (int) get_option('default_category')) {
+        return new \WP_Error('mau_agent_term', 'The default category cannot be deleted.', ['status' => 403]);
+    }
+    $snap = term_snapshot($term) + [
+        'objects'  => array_map('intval', (array) get_objects_in_term($term_id, $tax->name)),
+        'children' => array_map('intval', get_terms(['taxonomy' => $tax->name, 'parent' => $term_id, 'hide_empty' => false, 'fields' => 'ids'])),
+    ];
+    restoring(true);
+    try {
+        $done = wp_delete_term($term_id, $tax->name);
+    } finally {
+        restoring(false);
+    }
+    if ($done !== true) {
+        return new \WP_Error('mau_agent_term', 'WordPress did not delete the term.', ['status' => 500]);
+    }
+    log_change($term_id, 'term_delete', $snap);
+    return ['action' => 'deleted', 'term' => $term_id];
+}
+
+/**
+ * Undo the agent's last change to one term: created → deleted; renamed → old name, slug, description, parent
+ * back; deleted → created again and put back on its posts and child terms.
+ * @return array{action:string, term:int}|\WP_Error
+ */
+function term_undo(string $base, int $term_id)
+{
+    global $wpdb;
+    $tax = agent_taxonomy($base);
+    $row = $tax ? $wpdb->get_row($wpdb->prepare(
+        'SELECT * FROM ' . table() . " WHERE post_id = %d AND action LIKE 'term\\_%%' AND undone_at IS NULL AND created_at > %s ORDER BY id DESC LIMIT 1",
+        $term_id,
+        gmdate('Y-m-d H:i:s', time() - UNDO_DAYS * DAY_IN_SECONDS)
+    )) : null;
+    $snap = $row ? json_decode((string) $row->snapshot, true) : null;
+    if (!$row || ($snap['taxonomy'] ?? '') !== $tax->name) {
+        return new \WP_Error('mau_agent_nothing', 'No agent change to undo on this term.', ['status' => 404]);
+    }
+    restoring(true);
+    try {
+        if ($row->action === 'term_create') {
+            $r      = wp_delete_term($term_id, $tax->name);
+            $result = ['action' => 'deleted', 'term' => $term_id];
+        } elseif ($row->action === 'term_update') {
+            $r      = wp_update_term($term_id, $tax->name, array_intersect_key($snap, array_flip(['name', 'slug', 'description', 'parent'])));
+            $result = ['action' => 'restored', 'term' => $term_id];
+        } else {
+            $parent = $snap['parent'] && term_exists($snap['parent'], $tax->name) ? $snap['parent'] : 0;
+            $r      = wp_insert_term($snap['name'], $tax->name, ['slug' => $snap['slug'], 'description' => $snap['description'], 'parent' => $parent]);
+            if (!is_wp_error($r)) {
+                $new = (int) $r['term_id'];
+                foreach ($snap['objects'] as $object_id) {
+                    wp_set_object_terms($object_id, [$new], $tax->name, true);
+                }
+                foreach ($snap['children'] as $child) {
+                    wp_update_term($child, $tax->name, ['parent' => $new]);
+                }
+                $result = ['action' => 'restored', 'term' => $new];
+            }
+        }
+    } finally {
+        restoring(false);
+    }
+    if (is_wp_error($r ?? null) || ($r ?? null) === false) {
+        return new \WP_Error('mau_agent_term', is_wp_error($r) ? $r->get_error_message() : 'WordPress refused the change.', ['status' => 409]);
+    }
+    $wpdb->update(table(), ['undone_at' => current_time('mysql', true)], ['id' => $row->id]);
+    return $result;
 }
 
 // ---------------------------------------------------------------------------------
@@ -527,6 +690,7 @@ add_action('rest_api_init', function (): void {
             'site'    => get_bloginfo('name'),
             'user'    => wp_get_current_user()->user_login,
             'types'   => enabled_types(),
+            'terms'   => terms_enabled(),
         ],
     ]);
 
@@ -583,6 +747,21 @@ add_action('rest_api_init', function (): void {
             $post->post_type === 'attachment' ? wp_delete_attachment($post->ID, true) : wp_trash_post($post->ID);
             return ['ok' => true, 'post' => $post->ID];
         },
+    ]);
+
+    // Terms (1.2.0): delete and undo. Create and rename are the core term routes (allowlisted when terms are on).
+    $term = $id + ['taxonomy' => ['validate_callback' => fn($v) => (bool) preg_match('/^[\w-]+$/', $v)]];
+    register_rest_route('mau-agent/v1', '/term-delete/(?P<taxonomy>[\w-]+)/(?P<id>\d+)', [
+        'methods'             => 'POST',
+        'permission_callback' => $agent,
+        'args'                => $term,
+        'callback'            => fn(\WP_REST_Request $r) => term_delete((string) $r['taxonomy'], (int) $r['id']),
+    ]);
+    register_rest_route('mau-agent/v1', '/term-undo/(?P<taxonomy>[\w-]+)/(?P<id>\d+)', [
+        'methods'             => 'POST',
+        'permission_callback' => $agent,
+        'args'                => $term,
+        'callback'            => fn(\WP_REST_Request $r) => term_undo((string) $r['taxonomy'], (int) $r['id']),
     ]);
 
     register_rest_route('mau-agent/v1', '/log', [

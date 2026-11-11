@@ -38,6 +38,7 @@ class Cli
             'allowed_ips'  => array_values((array) get_option(OPT_IPS, [])),
             'types'        => enabled_types(),
             'extra_routes' => array_values((array) get_option(OPT_ROUTES, [])),
+            'terms'        => terms_enabled(),
         ];
         $this->out($data, $assoc);
     }
@@ -150,6 +151,24 @@ class Cli
         }
         WP_CLI::success(sprintf('Agent ready: user %s, types %s, IPs %s.', LOGIN, implode(',', $types), implode(',', $ips)));
         WP_CLI::line("Application password (shown once): $password");
+    }
+
+    /**
+     * Let the agent create, rename and delete terms of its enabled types (categories, event types…), or stop it.
+     * Separate from setup on purpose: re-running onboarding never changes it. Off by default.
+     *
+     * <on|off>
+     * : on = allowed, off = terms are read only (the default).
+     */
+    public function terms(array $args, array $assoc): void
+    {
+        $on = ($args[0] ?? '') === 'on';
+        if (!in_array($args[0] ?? '', ['on', 'off'], true)) {
+            WP_CLI::error('Usage: wp mau-agent terms <on|off>');
+        }
+        $on ? update_option(OPT_TERMS, '1', false) : delete_option(OPT_TERMS);
+        $names = array_map(fn($t) => $t->rest_base ?: $t->name, agent_taxonomies());
+        WP_CLI::success($on ? 'Terms on for: ' . (implode(', ', $names) ?: '(no taxonomies in the enabled types)') : 'Terms are read only.');
     }
 
     /**
