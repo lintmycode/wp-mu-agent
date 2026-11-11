@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 — 2026-11-11
+- **Terms, opt-in per site:** `wp mau-agent terms on` lets the agent create and rename terms of its enabled types'
+  taxonomies (core REST routes, now allowlisted for POST) and delete them through `POST term-delete/{taxonomy}/{id}`.
+  Every term change is logged in the same table (`term_create / term_update / term_delete`); `POST term-undo/{taxonomy}/{id}`
+  reverses the last one, recreating a deleted term on its posts and child terms. The term capabilities are granted at
+  check time, so `terms off` removes them at once. `ping` and `status` report `terms`. Off = 1.1.0 behaviour.
+
 ## 1.1.0 — 2026-11-11
 - **Delete on request:** `POST /mau-agent/v1/trash/{id}` moves one item of an enabled type to the trash (never a
   permanent delete). The runtime calls it only after the client confirmed in chat. It is logged with a snapshot,
