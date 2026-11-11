@@ -2,7 +2,7 @@
 /**
  * Plugin Name: nitida — MAU site agent
  * Description: Lets the MAU site agent (a Telegram bot on its own VPS) edit this site through the REST API and nothing more: a restricted role, application passwords for that role only and only from the agent's IP, signed draft previews, and an undo log.
- * Version: 1.0.1
+ * Version: 1.1.0
  * Author: nitida
  * License: MIT
  *
@@ -12,7 +12,9 @@
  *
  * Who can do what:
  *   - one user, `mau-agent`, with role `mau_agent`: edit and publish posts, pages and the content types
- *     enabled at setup, upload media. No delete, no unfiltered_html (kses filters what it writes),
+ *     enabled at setup, upload media. No delete capability, no unfiltered_html (kses filters what it writes);
+ *     it can move an item of an enabled type to the trash only through POST /mau-agent/v1/trash/{id},
+ *     after the client confirmed it, and that is logged so undo puts it back (1.1.0).
  *     no new terms, no settings, users, plugins or themes.
  *   - it authenticates only with an application password, only from the IPs saved at setup, and only
  *     on an allowlist of REST routes. It cannot log in to wp-admin.
@@ -24,7 +26,7 @@ namespace Nitida\Agent;
 
 defined('ABSPATH') || exit;
 
-const VERSION     = '1.0.1';
+const VERSION     = '1.1.0';
 const ROLE        = 'mau_agent';
 const LOGIN       = 'mau-agent';
 const APP_NAME    = 'mau-agent-vps';
@@ -354,6 +356,31 @@ function restore(int $post_id, array $snap): void
     }
 }
 
+/**
+ * Delete on the client's request: moves one item of an enabled type to the trash (never a permanent delete),
+ * logged with a snapshot so undo puts it back exactly, status included.
+ * @return array{action:string, post:int}|\WP_Error
+ */
+function trash(int $post_id)
+{
+    $post = get_post($post_id);
+    if (!$post || !in_array($post->post_type, enabled_types(), true) || $post->post_status === 'trash') {
+        return new \WP_Error('mau_agent_trash', 'Only content of an enabled type that is not already in the trash can be deleted.', ['status' => 403]);
+    }
+    $snap = snapshot($post_id);
+    restoring(true);   // the status change to trash must not be logged as an ordinary update
+    try {
+        $done = wp_trash_post($post_id);
+    } finally {
+        restoring(false);
+    }
+    if (!$done) {
+        return new \WP_Error('mau_agent_trash', 'WordPress did not move it to the trash.', ['status' => 500]);
+    }
+    log_change($post_id, 'trash', $snap);
+    return ['action' => 'trashed', 'post' => $post_id];
+}
+
 /** @return array{action:string, post:int}|\WP_Error */
 function undo(int $post_id)
 {
@@ -367,6 +394,19 @@ function undo(int $post_id)
         return new \WP_Error('mau_agent_nothing', 'No agent change to undo on this post.', ['status' => 404]);
     }
     $now = current_time('mysql', true);
+    // Last change was a delete: take it out of the trash and put the snapshot back (untrash alone leaves a
+    // draft since WP 5.6, and trashing renamed the slug to …__trashed; the snapshot has the original status and slug).
+    if ($rows[0]->action === 'trash') {
+        restoring(true);
+        try {
+            wp_untrash_post($post_id);
+        } finally {
+            restoring(false);
+        }
+        restore($post_id, json_decode($rows[0]->snapshot, true));
+        $wpdb->update(table(), ['undone_at' => $now], ['id' => $rows[0]->id]);
+        return ['action' => 'restored', 'post' => $post_id];
+    }
     // The agent created this post: undoing removes it (to the trash; a human can still restore it).
     if (array_filter($rows, fn($r) => $r->action === 'create')) {
         restoring(true);
@@ -518,6 +558,13 @@ add_action('rest_api_init', function (): void {
         'permission_callback' => $agent,
         'args'                => $id,
         'callback'            => fn(\WP_REST_Request $r) => undo((int) $r['id']),
+    ]);
+
+    register_rest_route('mau-agent/v1', '/trash/(?P<id>\d+)', [
+        'methods'             => 'POST',
+        'permission_callback' => fn(\WP_REST_Request $r) => is_agent() && current_user_can('edit_post', (int) $r['id']),
+        'args'                => $id,
+        'callback'            => fn(\WP_REST_Request $r) => trash((int) $r['id']),
     ]);
 
     // Cancel: throw away a draft or an upload the agent made for a change the client cancelled.

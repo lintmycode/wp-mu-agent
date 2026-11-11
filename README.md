@@ -8,7 +8,7 @@ Runbook: `~/projects/sys/mau-agent/README.md`.
 
 | | |
 |---|---|
-| **Role `mau_agent`** | edit + publish posts, pages and the content types enabled at setup; upload media. No `delete_*`, no `unfiltered_html` (WordPress kses-filters what it writes), no new terms, no settings, users, plugins, themes |
+| **Role `mau_agent`** | edit + publish posts, pages and the content types enabled at setup; upload media. No `delete_*` (deleting = `trash/{id}` only, reversible), no `unfiltered_html` (WordPress kses-filters what it writes), no new terms, no settings, users, plugins, themes |
 | **One user, `mau-agent`** | cannot log in to wp-admin (the login form refuses it); authenticates only with an application password |
 | **App passwords** | on for the agent role only. Every other user keeps what the site had: off under `wp-mu-security`, on where `WP_MU_SECURITY_ALLOW_APP_PASSWORDS=true` |
 | **IP lock** | the agent's password works only from the IPs saved at setup (`REMOTE_ADDR`; on jaws nginx sets it from `CF-Connecting-IP`). Empty list = nobody. `*` accepted outside production only |
@@ -23,7 +23,8 @@ Runbook: `~/projects/sys/mau-agent/README.md`.
 | `GET ping` | `{ok, version, site, user, types}` |
 | `GET schema` | content types in REST: `type, rest_base, namespace, label, fields, taxonomies, meta, acf` |
 | `POST preview/{id}` | `{url, expires}` for an unpublished post |
-| `POST undo/{id}` | the agent created it → trash (attachments deleted); else restore the last change. 404 when there is nothing to undo (only agent changes ≤ 30 days) |
+| `POST trash/{id}` | move one item of an enabled type to the trash (1.1.0; the runtime calls it only after the client confirmed); logged with a snapshot |
+| `POST undo/{id}` | last change was a trash → untrash and restore status, slug, meta, terms; the agent created it → trash (attachments deleted); else restore the last change. 404 when there is nothing to undo (only agent changes ≤ 30 days) |
 | `POST discard/{id}` | trash an unpublished draft / delete an upload the agent made (cancelled change) |
 | `GET log?month=YYYY-MM` | agent changes in that month |
 

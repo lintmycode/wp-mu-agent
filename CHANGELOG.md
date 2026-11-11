@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 — 2026-11-11
+- **Delete on request:** `POST /mau-agent/v1/trash/{id}` moves one item of an enabled type to the trash (never a
+  permanent delete). The runtime calls it only after the client confirmed in chat. It is logged with a snapshot,
+  so `undo` takes it out of the trash and restores status, slug, meta and terms. The role still has no `delete_*`
+  capability; this route is the only way in.
+
 ## 1.0.1 — 2026-11-10
 - **Security:** the REST allowlist did nothing on sites running ACF. ACF's `rest_pre_dispatch` callback (priority 10)
   returns null and overwrote our 403, so the agent could reach users, posts, pages and custom routes (its role's
