@@ -58,7 +58,9 @@ other `wp-mu-*` packages. Then `wp mau-agent setup …` (the onboarding script i
 blocked routes (users, settings, plugins, own profile, batch, products not enabled, DELETE), kses on content,
 signed preview (valid → 200 + noindex, tampered → 404), undo of two updates as one change, second undo → 404,
 undo of an agent-created draft → trash, discard refused on a human page, wp-admin login refused, admins'
-app-password setting unchanged. Then from the runtime (`mau-agent` repo): create → preview → publish → undo,
+app-password setting unchanged.
+1.2.1 on mau-demo locally, 2026-11-23: agent create (draft) → publish → gallery update; undo → gallery restored,
+still published; second undo → trash. Then from the runtime (`mau-agent` repo): create → preview → publish → undo,
 discard of a draft, media upload + discard.
 
 1.2.0 on the mau-demo site (local, WordPress 7.1, PHP 8.3), 2026-11-11: term create/rename through REST, core

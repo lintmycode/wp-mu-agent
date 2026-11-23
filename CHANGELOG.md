@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 — 2026-11-23
+- **Fix: undo of an update on a post the agent created trashed the whole post.** Any `create` row in the log sent
+  undo to the trash, so "desfazer" after adding photos to a new project deleted the project. Now only undoing the
+  creation itself trashes (the last row is the create, or the publish of the agent's own draft); any other update is
+  restored from its snapshot like on any post. A second undo then removes the post.
+- **Coalesce window 10 min → 20 s.** One publish is one REST call; 10 min merged two separate confirmed changes on
+  the same post, so undoing the last one reverted both.
+
 ## 1.2.0 — 2026-11-11
 - **Terms, opt-in per site:** `wp mau-agent terms on` lets the agent create and rename terms of its enabled types'
   taxonomies (core REST routes, now allowlisted for POST) and delete them through `POST term-delete/{taxonomy}/{id}`.
