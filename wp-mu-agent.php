@@ -2,7 +2,7 @@
 /**
  * Plugin Name: nitida — MAU site agent
  * Description: Lets the MAU site agent (a Telegram bot on its own VPS) edit this site through the REST API and nothing more: a restricted role, application passwords for that role only and only from the agent's IP, signed draft previews, and an undo log.
- * Version: 1.2.0
+ * Version: 1.2.1
  * Author: nitida
  * License: MIT
  *
@@ -28,7 +28,7 @@ namespace Nitida\Agent;
 
 defined('ABSPATH') || exit;
 
-const VERSION     = '1.2.0';
+const VERSION     = '1.2.1';
 const ROLE        = 'mau_agent';
 const LOGIN       = 'mau-agent';
 const APP_NAME    = 'mau-agent-vps';
@@ -40,7 +40,8 @@ const OPT_DB      = 'mau_agent_db';
 const DB_VERSION  = '1';
 const PREVIEW_TTL = 259200;                    // 72 h
 const UNDO_DAYS   = 30;
-const COALESCE    = 600;                       // updates to one post within 10 min are one change for undo
+const COALESCE    = 20;                        // updates to one post within 20 s are one change for undo (one publish = one REST call;
+                                               // 10 min merged two separate confirmed changes, so undo reverted both)
 
 define('MAU_AGENT_VERSION', VERSION);
 
@@ -454,8 +455,14 @@ function undo(int $post_id)
         $wpdb->update(table(), ['undone_at' => $now], ['id' => $rows[0]->id]);
         return ['action' => 'restored', 'post' => $post_id];
     }
-    // The agent created this post: undoing removes it (to the trash; a human can still restore it).
-    if (array_filter($rows, fn($r) => $r->action === 'create')) {
+    // Undoing the creation removes the post (to the trash; a human can still restore it). That is the last row being
+    // the create, or the publish of the agent's own draft (an update whose "before" was still a draft: the runtime
+    // creates a draft while staging and publishes it later). Any other update on a post the agent created is undone
+    // like on any post: restore its snapshot. Until 1.2.1 any create row in the log trashed the post, so "desfazer"
+    // after adding photos to a new project deleted the project (2026-11-23).
+    $before = $rows[0]->action === 'update' ? (json_decode($rows[0]->snapshot, true)['post']['post_status'] ?? '') : '';
+    $created = (bool) array_filter($rows, fn($r) => $r->action === 'create');
+    if ($rows[0]->action === 'create' || ($created && in_array($before, ['draft', 'auto-draft', 'pending'], true))) {
         restoring(true);
         try {
             get_post_type($post_id) === 'attachment' ? wp_delete_attachment($post_id, false) : wp_trash_post($post_id);
